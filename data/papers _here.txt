@@ -1,0 +1,3 @@
+Scientific papers used during development are not included in this repository.
+
+To use the pipeline, add PDF papers to the `data/papers/` directory before running the notebooks and generating the vector database.
