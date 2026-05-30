@@ -6,8 +6,10 @@ import ollama
 
 from sentence_transformers import SentenceTransformer
 
-# PAGE CONFIG
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
+# PAGE CONFIG
 st.set_page_config(
     page_title="AstroRAG",
     page_icon="🌌",
@@ -43,23 +45,40 @@ with st.sidebar:
     ### Scientific AI Assistant
 
     Powered by:
+
     - Ollama
-    - Mistral
     - FAISS
     - Sentence Transformers
     - Streamlit
-
-    ---
     """)
 
-    st.success("Model: Mistral")
+    model_name = st.selectbox(
+        "LLM Model",
+        [
+            "mistral",
+            "phi3:mini"
+        ]
+    )
+
+    st.metric(
+        "Conversation Messages",
+        len(st.session_state.messages)
+    )
 
     top_k = st.slider(
-        "Number of retrieved chunks",
-        1,
-        10,
-        3
+        "Number of Retrieved Chunks",
+        min_value=1,
+        max_value=10,
+        value=3
     )
+
+    st.markdown("---")
+
+    if st.button("🗑️ Clear Chat"):
+
+        st.session_state.messages = []
+
+        st.rerun()
 
     st.markdown("---")
 
@@ -68,6 +87,18 @@ with st.sidebar:
 # TITLE
 st.title("🌌 AstroRAG")
 st.subheader("Fast Radio Burst Scientific Assistant")
+st.markdown("""
+Ask questions about:
+
+- Fast Radio Bursts (FRBs)
+- Radio Astronomy
+- CHIME
+- Signal Detection
+- Machine Learning for Astronomy
+
+This assistant uses Retrieval-Augmented Generation (RAG)
+to answer questions using scientific literature as context.
+""")
 
 # LOAD DATA
 @st.cache_resource
@@ -95,8 +126,6 @@ def load_models():
 
 chunks, texts, embedding_model, index = load_models()
 
-
-
 # RETRIEVAL
 def retrieve_context(query, k=3):
 
@@ -107,19 +136,54 @@ def retrieve_context(query, k=3):
         k
     )
 
-    contexts = []
+    retrieved_chunks = []
 
-    for idx in indices[0]:
-        contexts.append(texts[idx])
+    for distance, idx in zip(distances[0], indices[0]):
 
-    return "\n\n".join(contexts)
+        similarity = 1 / (1 + float(distance))
+
+        retrieved_chunks.append({
+            "text": texts[idx],
+            "chunk_id": int(idx),
+            "similarity": similarity
+        })
+
+    context_text = "\n\n".join(
+        [chunk["text"] for chunk in retrieved_chunks]
+    )
+
+    return context_text, retrieved_chunks
+
+# HISTORY
+def build_conversation_history():
+
+    history = []
+
+    # 6 last messages
+    recent_messages = st.session_state.messages[-6:]
+
+    for msg in recent_messages:
+
+        history.append(
+            {
+                "role": msg["role"],
+                "content": msg["content"]
+            }
+        )
+
+    return history
 
 # AGENT
 def astroagent(query):
 
-    context = retrieve_context(query, k=top_k)
+    context, retrieved_chunks = retrieve_context(
+        query,
+        k=top_k
+    )
 
-    prompt = f"""
+    conversation_history = build_conversation_history()
+
+    prompt_text = f"""
 You are an AI scientific assistant specialized in radio astronomy and Fast Radio Bursts (FRBs).
 
 Use the scientific context below to answer the user's question.
@@ -133,24 +197,25 @@ Question:
 Answer:
 """
 
-    response = ollama.chat(
-        model='mistral',
-        messages=[
-            {
-                'role': 'user',
-                'content': prompt
-            }
-        ]
+    messages = conversation_history.copy()
+
+    messages.append(
+        {
+            "role": "user",
+            "content": prompt_text
+        }
     )
 
-    return response['message']['content']
+    stream = ollama.chat(
+        model=model_name,
+        messages=messages,
+        stream=True
+    )
+
+    return stream, retrieved_chunks
 
 
-# CHAT HISTORY
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# DISPLAY CHAT
+# DISPLAY CHAT HISTORY
 for message in st.session_state.messages:
 
     with st.chat_message(message["role"]):
@@ -163,9 +228,11 @@ prompt = st.chat_input(
     "Ask something about FRBs..."
 )
 
+
 # RUN AGENT
 if prompt:
 
+    # USER MESSAGE
     st.session_state.messages.append(
         {
             "role": "user",
@@ -177,17 +244,54 @@ if prompt:
 
         st.markdown(prompt)
 
+    # ASSISTANT MESSAGE
     with st.chat_message("assistant"):
 
         with st.spinner("AstroRAG is thinking..."):
 
-            response = astroagent(prompt)
+            response_stream, retrieved_chunks = astroagent(prompt)
 
-            st.markdown(response)
+            response_placeholder = st.empty()
 
+            full_response = ""
+
+            for chunk in response_stream:
+
+                content = chunk["message"]["content"]
+
+                full_response += content
+
+                response_placeholder.markdown(
+                    full_response
+                )
+
+        # Retrieval Information
+        st.caption(
+            f"Retrieved {len(retrieved_chunks)} chunks"
+        )
+
+        with st.expander("Retrieved Context"):
+
+            for chunk in retrieved_chunks:
+
+                st.markdown(
+                    f"""
+**Chunk {chunk['chunk_id']}**
+
+Similarity: {chunk['similarity']:.3f}
+"""
+                )
+
+                st.write(
+                    chunk["text"][:1000]
+                )
+
+                st.divider()
+
+    # SAVE ASSISTANT RESPONSE
     st.session_state.messages.append(
         {
             "role": "assistant",
-            "content": response
+            "content": full_response
         }
     )
